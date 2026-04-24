@@ -42,6 +42,16 @@ def standardize_mix(x, eps=1e-8):
     return (x - mean) / (std + eps)
 
 
+def normalize_mixed_batch(mixed_batch, eps=1e-8):
+    """
+    与 preprocess_data 中 mixed_signals 的归一化口径保持一致：
+    按样本整体（通道+时序）做零均值、单位方差归一化。
+    """
+    data_mean = np.mean(mixed_batch, axis=(-1, -2), keepdims=True)
+    data_std = np.std(mixed_batch, axis=(-1, -2), keepdims=True)
+    return (mixed_batch - data_mean) / (data_std + eps)
+
+
 def align_sources(true_sources, est_sources, eps=1e-8):
     n_source = true_sources.shape[0]
     best_perm = None
@@ -174,8 +184,10 @@ def evaluate_robustness(model, snr_list, test_source, n_source, run_classic=True
         loop_len = test_mixed.shape[0] if max_samples is None else min(test_mixed.shape[0], max_samples)
         test_mixed = test_mixed[:loop_len]
         cur_source = test_source[:loop_len]
+        # 统一与训练/第二部分测试口径：先做样本级整体归一化
+        test_mixed_norm = normalize_mixed_batch(test_mixed)
 
-        deep_sep = deep_inference(model, test_mixed)
+        deep_sep = deep_inference(model, test_mixed_norm)
         deep_sep = align_batch(cur_source, deep_sep)
         deep_sdr = float(np.mean(calculate_sdr(cur_source, deep_sep)))
 
@@ -188,7 +200,7 @@ def evaluate_robustness(model, snr_list, test_source, n_source, run_classic=True
             ica_sdr_list = []
             sobi_sdr_list = []
             for i in range(loop_len):
-                x = standardize_mix(test_mixed[i])
+                x = standardize_mix(test_mixed_norm[i])
                 ica_sep, _ = fastica(x.T, n_components=n_source)
                 ica_sep = align_sources(cur_source[i], ica_sep.T)
                 ica_sdr_list.append(np.mean(calculate_sdr(cur_source[i : i + 1], ica_sep[np.newaxis, :, :])))
@@ -206,8 +218,8 @@ if __name__ == "__main__":
     RUN_CLASSIC = True
     RUN_ROBUSTNESS = True
     RUN_VISUALIZATION = True
-    MAX_CLASSIC_SAMPLES = 10  # 例如改成 300 可加快经典算法评估
-    MAX_ROBUSTNESS_SAMPLES = 10  # 例如改成 300 可加快鲁棒性测试
+    MAX_CLASSIC_SAMPLES = 30  # 例如改成 300 可加快经典算法评估
+    MAX_ROBUSTNESS_SAMPLES = 30  # 例如改成 300 可加快鲁棒性测试
 
     data_config, model_config, train_config = load_configs()
 
@@ -227,22 +239,29 @@ if __name__ == "__main__":
     n_source = data_config["n_source"]
     model = build_model(train_config, model_config)
 
+    eval_len = test_data.shape[0]
+    if RUN_CLASSIC and MAX_CLASSIC_SAMPLES is not None:
+        eval_len = min(eval_len, MAX_CLASSIC_SAMPLES)
+    eval_data = test_data[:eval_len]
+    eval_label = test_label[:eval_len]
+    print(f"  本轮分离测试样本数：{eval_len}")
+
     print("2. 执行各算法分离测试...")
-    deep_separated = deep_inference(model, test_data)
-    deep_aligned = align_batch(test_label, deep_separated)
+    deep_separated = deep_inference(model, eval_data)
+    deep_aligned = align_batch(eval_label, deep_separated)
 
     all_separated = {
-        "source": test_label,
-        "mixed": test_data,
+        "source": eval_label,
+        "mixed": eval_data,
         "deep": deep_aligned,
     }
     if RUN_CLASSIC:
         print("  经典算法推理中...")
         ica_sep, sobi_sep = run_classic_algorithms(
-            test_data=test_data,
-            test_label=test_label,
+            test_data=eval_data,
+            test_label=eval_label,
             n_source=n_source,
-            max_samples=MAX_CLASSIC_SAMPLES,
+            max_samples=None,
         )
         all_separated["ica"] = ica_sep
         all_separated["sobi"] = sobi_sep
@@ -253,7 +272,7 @@ if __name__ == "__main__":
     if RUN_CLASSIC:
         metrics_targets["ica"] = all_separated["ica"]
         metrics_targets["sobi"] = all_separated["sobi"]
-    metrics_df = collect_metrics(test_label, metrics_targets, n_source)
+    metrics_df = collect_metrics(eval_label, metrics_targets, n_source)
     metrics_df.to_csv(f"{METRICS_SAVE_DIR}/separation_metrics.csv", index=False, encoding="utf-8-sig")
     print("  量化指标已保存至 results/metrics/")
     print("\n分离效果平均指标：")
@@ -265,7 +284,7 @@ if __name__ == "__main__":
         robustness_df = evaluate_robustness(
             model=model,
             snr_list=data_config["snr_list"],
-            test_source=test_label,
+            test_source=eval_label,
             n_source=n_source,
             run_classic=RUN_CLASSIC,
             max_samples=MAX_ROBUSTNESS_SAMPLES,
