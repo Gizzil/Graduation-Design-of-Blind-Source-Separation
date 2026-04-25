@@ -1,0 +1,10 @@
+# 训练超参数配置
+model_type: convtasnet         # 模型类型，可选 cnn / convtasnet / mlp / tcn
+epochs: 100                   # 最大训练轮数
+batch_size: 32                # 批次大小
+lr: 0.001                     # 学习率
+optimizer: Adam               # 优化器
+loss: MSE                     # 损失函数
+l2_lambda: 0.0001            # L2正则化系数
+patience: 10                  # 早停耐心值
+min_delta: 0.00001           # 早停最小变化阈值
